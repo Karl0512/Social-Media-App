@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -13,6 +14,14 @@ class PostCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Widget img(String path) {
+      // If the path is very long, it's likely a Base64 string from Firestore
+      if (path.length > 500) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Image.memory(base64Decode(path), fit: BoxFit.cover),
+        );
+      }
+
       return ClipRRect(
         borderRadius: BorderRadius.circular(16),
         child: kIsWeb ? Image.network(path) : Image.file(File(path)),

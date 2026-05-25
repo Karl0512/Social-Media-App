@@ -1,10 +1,12 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../models/post.dart';
 import '../services/post_service.dart';
+import '../database_service.dart';
 import '../widgets/post_card.dart';
 import '../widgets/ui_card.dart';
 
@@ -19,28 +21,59 @@ class FeedScreen extends StatefulWidget {
 
 class _FeedScreenState extends State<FeedScreen> {
   final controller = TextEditingController();
+  final DatabaseService _dbService = DatabaseService();
   String? image;
+  XFile? _pickedFile;
+  bool _isLoading = false;
 
   Future<void> pickImage() async {
     final picker = ImagePicker();
-    final file = await picker.pickImage(source: ImageSource.gallery);
+    // Resize and compress to keep Base64 string under 1MB Firestore limit
+    _pickedFile = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 800,
+      maxHeight: 800,
+      imageQuality: 70,
+    );
 
-    if (file != null) setState(() => image = file.path);
+    if (_pickedFile != null) setState(() => image = _pickedFile!.path);
   }
 
-  void post() {
+  Future<void> _handlePost() async {
     if (controller.text.isEmpty && image == null) return;
 
-    PostService.addPost(Post(
-      username: widget.username,
-      content: controller.text,
-      imagePath: image,
-    ));
+    setState(() => _isLoading = true);
+    
+    // Read the image as bytes to send to the service
+    final bytes = await _pickedFile?.readAsBytes();
 
-    setState(() {
-      controller.clear();
-      image = null;
-    });
+    try {
+      // Upload to Firestore
+      await _dbService.uploadPost(
+        controller.text, 
+        widget.username, 
+        imageBytes: bytes,
+      );
+
+      if (mounted) {
+        setState(() {
+          controller.clear();
+          image = null;
+          _pickedFile = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Post!')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: ${e.toString()}')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   Widget renderImage(String path) {
@@ -87,8 +120,15 @@ class _FeedScreenState extends State<FeedScreen> {
                         ),
                         const Spacer(),
                         ElevatedButton(
-                          onPressed: post,
-                          child: const Text("Post"),
+                          onPressed: _isLoading ? null : _handlePost,
+                          child: _isLoading
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2),
+                                )
+                              : const Text("Post"),
                         )
                       ],
                     )
@@ -98,13 +138,29 @@ class _FeedScreenState extends State<FeedScreen> {
             ).animate().fadeIn(duration: 300.ms).slideY(begin: 0.2),
           ),
           Expanded(
-            child: ListView.builder(
-              itemCount: PostService.posts.length,
-              itemBuilder: (_, i) => PostCard(
-                post: PostService.posts[i],
-                refresh: () => setState(() {}),
-              ).animate().fadeIn(),
-            ),
+                child: StreamBuilder<QuerySnapshot>(
+                    stream: _dbService.getPostsStream(),
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return Center(child: Text("Error: ${snapshot.error}"));
+                      }
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+
+                      final docs = snapshot.data?.docs ?? [];
+
+                      return ListView.builder(
+                        itemCount: docs.length,
+                        itemBuilder: (_, i) {
+                          final post = Post.fromFirestore(docs[i]);
+                          return PostCard(
+                            post: post,
+                            refresh: () => setState(() {}),
+                          ).animate().fadeIn();
+                        },
+                      );
+                    }),
           )
         ],
       ),
